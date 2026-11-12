@@ -24,7 +24,13 @@ async function bodyOf(request: Request): Promise<Row> {
 function sameOrigin(request: Request): boolean {
   const origin = request.headers.get("origin");
   if (!origin) return true;
-  try { return new URL(origin).host === new URL(request.url).host; } catch { return false; }
+  try {
+    const originHost = new URL(origin).host.toLowerCase();
+    const requestUrlHost = new URL(request.url).host.toLowerCase();
+    const hostHeader = request.headers.get("host")?.trim().toLowerCase();
+    const forwardedHost = request.headers.get("x-forwarded-host")?.split(",")[0].trim().toLowerCase();
+    return [hostHeader, forwardedHost, requestUrlHost].filter(Boolean).includes(originHost);
+  } catch { return false; }
 }
 
 function requireUser(request: Request, roles: Array<"admin" | "hotel_manager">): User | Response {
