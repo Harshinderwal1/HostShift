@@ -6,7 +6,7 @@ import path from "node:path";
 const dbPath = path.resolve(process.cwd(), process.env.HOSTSHIFT_DB_PATH || "data/hostshift.sqlite");
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
-export const db = new DatabaseSync(dbPath);
+export const db = new DatabaseSync(dbPath, { timeout: 10_000 });
 db.exec("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
 db.exec(`
   CREATE TABLE IF NOT EXISTS hotels (
