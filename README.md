@@ -1,6 +1,6 @@
 # Hostshift pilot MVP
 
-Hostshift is a local full-stack pilot app for independent hotels to post temporary shifts and invite nearby, manually verified hospitality workers. Hotel managers use the website; workers can submit a one-time registration request from the sign-in page, then receive invitations and shift updates through the WhatsApp integration. Worker accounts and a worker dashboard are not part of this pilot MVP.
+Hostshift is a local full-stack pilot app for independent hotels to post temporary shifts and invite nearby, manually verified hospitality workers. Hotel managers use the website; workers can submit a one-time registration request from the sign-in page, then become eligible for shift invitations through the WhatsApp provider once it is configured. Worker accounts and a worker dashboard are not part of this pilot MVP.
 
 ## Run locally
 

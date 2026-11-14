@@ -153,7 +153,7 @@ export default function HostshiftApp() {
       sandboxMode={sandboxMode} pilotArea={pilotArea} supportedRoles={supportedRoles} notice={notice} modal={modal} setModal={setModal}
       signIn={signIn} resetToken={resetToken} setResetToken={setResetToken} resetLink={resetLink} setResetLink={setResetLink}
       onAccessRequest={async (form: AnyRecord) => run(async () => { await api("access-requests", "POST", form); setModal(null); }, "Request sent. You can sign in with your chosen password after the hotel is approved.")}
-      onWorkerRequest={async (form: AnyRecord) => run(async () => { await api("worker-registration-requests", "POST", form); setModal(null); }, "Registration request received. The pilot team will verify your profile and contact you on WhatsApp.")}
+      onWorkerRequest={async (form: AnyRecord) => run(async () => { await api("worker-registration-requests", "POST", form); setModal(null); }, "Registration request received. The pilot team will verify your profile before shift invitations.")}
       onForgot={async (email: string) => { const r = await api("auth/forgot", "POST", { email }); setResetLink(r.sandboxResetUrl || ""); notify(r.message); }}
       onReset={async (token: string, password: string) => { const r = await api("auth/reset", "POST", { token, password }); try { await api("auth/logout", "POST", {}); } catch { /* reset still completed */ } setUser(null); setIsResetPage(false); setModal(null); window.history.replaceState({}, "", "/"); notify(r.message); }}
     />;
