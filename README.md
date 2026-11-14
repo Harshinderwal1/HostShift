@@ -1,6 +1,6 @@
 # Hostshift pilot MVP
 
-Hostshift is a local full-stack pilot app for independent hotels to post temporary shifts and invite nearby, manually verified hospitality workers. Hotel managers use the website. The worker website is intentionally omitted; worker sign-up, replies, attendance, and payment notifications are represented by the admin WhatsApp simulator until a WhatsApp provider is configured.
+Hostshift is a local full-stack pilot app for independent hotels to post temporary shifts and invite nearby, manually verified hospitality workers. Hotel managers use the website; workers can submit a one-time registration request from the sign-in page, then receive invitations and shift updates through the WhatsApp integration. Worker accounts and a worker dashboard are not part of this pilot MVP.
 
 ## Run locally
 
@@ -30,7 +30,9 @@ The `.env.example` passwords match these accounts. The UI labels simulated behav
 6. As the hotel manager, approve recorded hours and the overtime amount. The worker must also confirm the total hours and pay in the simulator. Then open that assignment's payment QR.
 7. The shift-specific sandbox QR expires after 30 minutes. Simulate payment success before expiry; this marks collection and payout as simulated and moves no money. Review payment, support, dispute, and audit screens.
 
-For a new hotel, submit **Request hotel access**. An admin reviews the request, enters an approximate hotel pin, approves it, and shares the one-time setup link with the manager. Worker profiles can be added through the admin registration simulator, including a consent flag and an approximate area pin; then manually verify the profile before matching. If a worker has not checked in after the shift starts, the hotel can report a possible no-show. The worker response is simulated in the admin inbox; resolve the case only after reviewing that response or allowing the pilot response window to pass.
+For a new hotel, submit **Request hotel access** and choose a password. The password is stored as a salted hash; the manager account stays inactive until an admin reviews the request, pins the hotel, and approves it. After approval, the manager can sign in with that password. Rejected requests have their pending manager account removed. Older requests without a chosen password still use a one-time setup link.
+
+Workers can submit a one-time registration request from **Register as a worker** on the sign-in page. The form collects their name, WhatsApp number, city and nearby landmark, approximate location, travel radius, roles, skills, availability, preferred language, and consent to WhatsApp shift alerts. The location button uses browser geolocation and rounds coordinates to three decimal places; workers can also enter an approximate public landmark pin manually. No worker password or bank details are collected. The profile enters the admin verification queue and cannot receive shift invitations until manually verified. The admin registration simulator remains available for pilot setup. If a worker has not checked in after the shift starts, the hotel can report a possible no-show. The worker response is simulated in the admin inbox; resolve the case only after reviewing that response or allowing the pilot response window to pass.
 
 ## Environment settings
 

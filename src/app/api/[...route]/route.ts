@@ -15,6 +15,7 @@ const sandbox = () => process.env.HOSTSHIFT_SANDBOX !== "false" && process.env.N
 const clean = (value: unknown, max = 500) => String(value ?? "").trim().slice(0, max);
 const numeric = (value: unknown, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 const loginWindows = new Map<string, { count: number; startedAt: number }>();
+const workerRegistrationWindows = new Map<string, { count: number; startedAt: number }>();
 const shiftStartInstant = (date: string, time: string) => new Date(`${date}T${time}:00+05:30`).getTime();
 
 async function bodyOf(request: Request): Promise<Row> {
@@ -78,7 +79,8 @@ async function handle(request: Request): Promise<Response> {
   if (input && !sameOrigin(request)) return fail("Request origin could not be verified.", 403);
 
   if (method === "GET" && path.join("/") === "session") {
-    return ok({ user: getSessionUser(request), sandbox: sandbox(), pilotArea: getSetting("pilot_area", "Pilot Area") });
+    const supportedRoles = parseJson<string[]>(getSetting("supported_roles", JSON.stringify(["Banquet Server", "Housekeeping Attendant", "Kitchen Assistant", "Restaurant Service", "Front Desk Assistant"])), []);
+    return ok({ user: getSessionUser(request), sandbox: sandbox(), pilotArea: getSetting("pilot_area", "Pilot Area"), supportedRoles });
   }
 
   if (method === "POST" && path.join("/") === "auth/login") {
@@ -91,8 +93,10 @@ async function handle(request: Request): Promise<Response> {
     if (window && Date.now() - window.startedAt < 15 * 60_000 && window.count >= 8) return fail("Too many sign-in attempts. Try again in 15 minutes.", 429);
     if (!window || Date.now() - window.startedAt >= 15 * 60_000) loginWindows.set(attemptKey, { count: 1, startedAt: Date.now() });
     else window.count += 1;
-    const user = db.prepare("SELECT * FROM users WHERE email=? AND status='active'").get(email) as Row | undefined;
+    const user = db.prepare("SELECT * FROM users WHERE email=?").get(email) as Row | undefined;
     if (!user || !verifyPassword(password, user.password_salt, user.password_hash)) return fail("Email or password is incorrect.", 401);
+    if (user.status === "pending") return fail("Your hotel access request is still awaiting pilot team approval.", 403);
+    if (user.status !== "active") return fail("Email or password is incorrect.", 401);
     loginWindows.delete(attemptKey);
     const token = createSession(user.id);
     audit(user.id, "sign_in", "user", user.id);
@@ -133,13 +137,71 @@ async function handle(request: Request): Promise<Response> {
     const phone = clean(input.phone, 40);
     const city = clean(input.city, 100);
     const area = clean(input.area, 100);
-    if (!hotelName || !managerName || !email.includes("@") || !phone || !city || !area) return fail("Complete all required hotel and manager details.");
+    const password = String(input.password ?? "");
+    if (!hotelName || !managerName || !email.includes("@") || !phone || !city || !area || !password) return fail("Complete all required hotel, manager, and password details.");
+    if (password.length < 10) return fail("Choose a password with at least 10 characters.");
     const existing = db.prepare("SELECT id FROM access_requests WHERE email=? AND status='pending'").get(email);
     if (existing) return fail("An access request for this email is already under review.", 409);
+    if (db.prepare("SELECT id FROM users WHERE email=?").get(email)) return fail("An account already exists with this business email. Sign in or use a different email.", 409);
     const requestId = id();
-    db.prepare("INSERT INTO access_requests(id,hotel_name,city,area,address,manager_name,email,phone,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
-      .run(requestId, hotelName, city, area, clean(input.address, 240), managerName, email, phone, "pending", nowIso());
-    return ok({ ok: true, message: "Request received. The pilot team will verify the hotel before inviting the manager." }, 201);
+    const userId = id();
+    const { salt, hash } = passwordParts(password);
+    const at = nowIso();
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      db.prepare("INSERT INTO access_requests(id,hotel_name,city,area,address,manager_name,email,phone,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
+        .run(requestId, hotelName, city, area, clean(input.address, 240), managerName, email, phone, "pending", at);
+      db.prepare("INSERT INTO users(id,email,name,role,hotel_id,password_hash,password_salt,status,created_at) VALUES(?,?,?,'hotel_manager',NULL,?,?, 'pending',?)")
+        .run(userId, email, managerName, hash, salt, at);
+      db.exec("COMMIT");
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch { /* no transaction remained open */ }
+      if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) return fail("An account or pending request already exists for this business email.", 409);
+      throw error;
+    }
+    return ok({ ok: true, message: "Request received. The pilot team will verify the hotel; you can sign in with your chosen password after approval." }, 201);
+  }
+
+  if (method === "POST" && path.join("/") === "worker-registration-requests") {
+    const name = clean(input.name, 120);
+    const phone = clean(input.phone, 40).replace(/[^\d+]/g, "");
+    const city = clean(input.city, 100) || getSetting("pilot_area", "Pilot Area");
+    const area = clean(input.area, 100);
+    const latitude = Math.round(Number(input.latitude) * 1000) / 1000;
+    const longitude = Math.round(Number(input.longitude) * 1000) / 1000;
+    const radiusKm = numeric(input.radiusKm, 10);
+    const configuredRoles = parseJson<string[]>(getSetting("supported_roles", JSON.stringify(["Banquet Server", "Housekeeping Attendant", "Kitchen Assistant", "Restaurant Service", "Front Desk Assistant"])), []);
+    const requestedRoles = Array.isArray(input.roles) ? input.roles.map((value: unknown) => clean(value, 80)).filter(Boolean) : [];
+    const roleMap = new Map(configuredRoles.map((role) => [role.toLowerCase(), role]));
+    const roles = [...new Set(requestedRoles.map((role) => roleMap.get(role.toLowerCase())).filter((role): role is string => Boolean(role)))];
+    const skills = Array.isArray(input.skills) ? input.skills.map((value: unknown) => clean(value, 80)).filter(Boolean) : clean(input.skills, 500).split(",").map((value) => value.trim()).filter(Boolean);
+    const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun", "All days"];
+    const requestedAvailability = Array.isArray(input.availability) ? input.availability.map((value: unknown) => clean(value, 20)) : [];
+    const availability = [...new Set(requestedAvailability.filter((day) => days.includes(day)))];
+    if (!name || !/^\+[1-9]\d{7,14}$/.test(phone) || !city || !area || !roles.length || !availability.length || input.optedIn !== true) {
+      return fail("Add your name, WhatsApp number with country code, area, at least one role and available day, and agree to WhatsApp shift alerts.");
+    }
+    if (requestedRoles.some((role) => !roleMap.has(role.toLowerCase()))) return fail("Choose only job roles currently available in the pilot area.");
+    if (String(input.latitude ?? "").trim() === "" || String(input.longitude ?? "").trim() === "" || !Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+      return fail("Add a valid approximate map pin near your area. Do not enter your home address.");
+    }
+    if (!Number.isFinite(radiusKm) || radiusKm < 1 || radiusKm > 100) return fail("Choose a travel radius between 1 and 100 km.");
+    const remote = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "local";
+    const rate = workerRegistrationWindows.get(remote);
+    if (rate && Date.now() - rate.startedAt < 60 * 60_000 && rate.count >= 5) return fail("Too many registration requests. Try again in an hour.", 429);
+    if (!rate || Date.now() - rate.startedAt >= 60 * 60_000) workerRegistrationWindows.set(remote, { count: 1, startedAt: Date.now() });
+    else rate.count += 1;
+    const workerId = id();
+    const at = nowIso();
+    try {
+      db.prepare("INSERT INTO workers(id,name,phone,city,area,latitude,longitude,radius_km,roles_json,skills_json,availability_json,language,verified,active,opted_in,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,1,1,?)")
+        .run(workerId, name, phone, city, area, latitude, longitude, radiusKm, JSON.stringify(roles), JSON.stringify(skills), JSON.stringify(availability), clean(input.language, 40) || "Hindi", at);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) return fail("This WhatsApp number is already registered. Contact the pilot team if you need help.", 409);
+      throw error;
+    }
+    audit(null, "worker_registration_request", "worker", workerId, `Public form registration; WhatsApp shift-alert consent recorded at ${at}.`);
+    return ok({ ok: true, message: "Registration received. The pilot team will verify your details before sending shift invitations." }, 201);
   }
 
   if (method === "GET" && path.join("/") === "hotel/overview") {
@@ -562,7 +624,7 @@ async function handle(request: Request): Promise<Response> {
   if (method === "GET" && path.join("/") === "admin/overview") {
     const auth = requireUser(request, ["admin"]);
     if (auth instanceof Response) return auth;
-    const accessRequests = db.prepare("SELECT * FROM access_requests ORDER BY created_at DESC LIMIT 100").all();
+    const accessRequests = db.prepare("SELECT r.*,CASE WHEN u.id IS NULL THEN 0 ELSE 1 END AS manager_password_set FROM access_requests r LEFT JOIN users u ON u.email=r.email AND u.status='pending' AND u.hotel_id IS NULL ORDER BY r.created_at DESC LIMIT 100").all();
     const workers = db.prepare("SELECT * FROM workers ORDER BY verified,created_at DESC LIMIT 200").all() as Row[];
     const shifts = db.prepare("SELECT s.*,h.name AS hotel_name,(SELECT COUNT(*) FROM assignments a WHERE a.shift_id=s.id AND a.status NOT IN ('cancelled','cancelled_late','no_show')) AS assigned_count FROM shifts s JOIN hotels h ON h.id=s.hotel_id ORDER BY s.created_at DESC LIMIT 100").all();
     const disputes = db.prepare("SELECT d.*,w.name AS worker_name,s.role,s.shift_date,h.name AS hotel_name FROM disputes d JOIN assignments a ON a.id=d.assignment_id JOIN workers w ON w.id=a.worker_id JOIN shifts s ON s.id=a.shift_id JOIN hotels h ON h.id=s.hotel_id ORDER BY d.created_at DESC LIMIT 100").all();
@@ -573,7 +635,7 @@ async function handle(request: Request): Promise<Response> {
     const supportRequests = db.prepare("SELECT r.*,h.name AS hotel_name,u.name AS manager_name FROM support_requests r JOIN hotels h ON h.id=r.hotel_id JOIN users u ON u.id=r.user_id ORDER BY r.created_at DESC LIMIT 100").all();
     const auditLogs = db.prepare("SELECT l.*,u.name AS actor_name FROM audit_logs l LEFT JOIN users u ON u.id=l.actor_user_id ORDER BY l.created_at DESC LIMIT 200").all();
     const settings = db.prepare("SELECT key,value FROM settings ORDER BY key").all();
-    return ok({ accessRequests, workers: workers.map((worker) => ({ ...worker, roles: parseJson(worker.roles_json, []), skills: parseJson(worker.skills_json, []) })), shifts, disputes, messages, payments, invitations, assignments, supportRequests, auditLogs, settings });
+    return ok({ accessRequests, workers: workers.map((worker) => ({ ...worker, roles: parseJson(worker.roles_json, []), skills: parseJson(worker.skills_json, []), availability: parseJson(worker.availability_json, []) })), shifts, disputes, messages, payments, invitations, assignments, supportRequests, auditLogs, settings });
   }
 
   if (method === "POST" && path[0] === "admin" && path[1] === "access-requests" && path[3] === "approve" && path.length === 4) {
@@ -581,25 +643,40 @@ async function handle(request: Request): Promise<Response> {
     if (auth instanceof Response) return auth;
     const requestRow = db.prepare("SELECT * FROM access_requests WHERE id=? AND status='pending'").get(path[2]) as Row | undefined;
     if (!requestRow) return fail("This request is not pending.", 404);
-    const existing = db.prepare("SELECT id FROM users WHERE email=?").get(requestRow.email);
-    if (existing) return fail("A user already has this email. Review that account before approval.", 409);
+    const existingManager = db.prepare("SELECT * FROM users WHERE email=?").get(requestRow.email) as Row | undefined;
+    const managerSetPassword = existingManager?.role === "hotel_manager" && existingManager.status === "pending" && existingManager.hotel_id == null;
+    if (existingManager && !managerSetPassword) return fail("A user already has this email. Review that account before approval.", 409);
     const hotelId = id();
-    const userId = id();
-    const tempPassword = `Invite-${id().slice(0, 8)}!`;
-    const { salt, hash } = passwordParts(tempPassword);
+    const userId = managerSetPassword ? existingManager!.id : id();
     const at = nowIso();
     const latitude = Number(input.latitude);
     const longitude = Number(input.longitude);
     if (String(input.latitude ?? "").trim() === "" || String(input.longitude ?? "").trim() === "" || !Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) return fail("Enter valid approximate hotel coordinates before approving.");
-    db.prepare("INSERT INTO hotels(id,name,city,area,address,latitude,longitude,status,manager_name,contact_email,created_at) VALUES(?,?,?,?,?,?,?,'approved',?,?,?)")
-      .run(hotelId, requestRow.hotel_name, requestRow.city, requestRow.area, requestRow.address, latitude, longitude, requestRow.manager_name, requestRow.email, at);
-    db.prepare("INSERT INTO users(id,email,name,role,hotel_id,password_hash,password_salt,status,created_at) VALUES(?,?,?,'hotel_manager',?,?,?,'active',?)")
-      .run(userId, requestRow.email, requestRow.manager_name, hotelId, hash, salt, at);
-    db.prepare("UPDATE access_requests SET status='approved',reviewed_at=?,reviewed_by=? WHERE id=?").run(at, auth.id, requestRow.id);
+    let legacyCredentials: { salt: string; hash: string } | null = null;
+    if (!managerSetPassword) legacyCredentials = passwordParts(`Invite-${id().slice(0, 8)}!`);
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      db.prepare("INSERT INTO hotels(id,name,city,area,address,latitude,longitude,status,manager_name,contact_email,created_at) VALUES(?,?,?,?,?,?,?,'approved',?,?,?)")
+        .run(hotelId, requestRow.hotel_name, requestRow.city, requestRow.area, requestRow.address, latitude, longitude, requestRow.manager_name, requestRow.email, at);
+      if (managerSetPassword) {
+        db.prepare("UPDATE users SET name=?,hotel_id=?,status='active' WHERE id=? AND status='pending'")
+          .run(requestRow.manager_name, hotelId, userId);
+      } else {
+        db.prepare("INSERT INTO users(id,email,name,role,hotel_id,password_hash,password_salt,status,created_at) VALUES(?,?,?,'hotel_manager',?,?,?,'active',?)")
+          .run(userId, requestRow.email, requestRow.manager_name, hotelId, legacyCredentials!.hash, legacyCredentials!.salt, at);
+      }
+      db.prepare("UPDATE access_requests SET status='approved',reviewed_at=?,reviewed_by=? WHERE id=? AND status='pending'").run(at, auth.id, requestRow.id);
+      audit(auth.id, "approve_hotel", "hotel", hotelId, `Approved access request ${requestRow.id}.`);
+      db.exec("COMMIT");
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch { /* no transaction remained open */ }
+      if (error instanceof Error && error.message.includes("UNIQUE constraint failed")) return fail("A hotel or manager account already exists for this request.", 409);
+      throw error;
+    }
+    if (managerSetPassword) return ok({ ok: true, hotelId, message: "Hotel approved. The manager can now sign in with the password they chose." });
     const resetToken = makeResetToken(userId);
     const inviteUrl = `/reset-password?token=${encodeURIComponent(resetToken)}`;
-    audit(auth.id, "approve_hotel", "hotel", hotelId, `Approved access request ${requestRow.id}.`);
-    return ok({ ok: true, hotelId, inviteUrl, message: "Hotel approved. Share the one-time password setup link with the manager." });
+    return ok({ ok: true, hotelId, inviteUrl, message: "Legacy hotel request approved. Share the one-time password setup link with the manager." });
   }
 
   if (method === "POST" && path[0] === "admin" && path[1] === "access-requests" && path[3] === "reject" && path.length === 4) {
@@ -607,10 +684,20 @@ async function handle(request: Request): Promise<Response> {
     if (auth instanceof Response) return auth;
     const reason = clean(input.reason, 500);
     if (!reason) return fail("Add a reason for rejecting this hotel request.");
+    const requestRow = db.prepare("SELECT email FROM access_requests WHERE id=? AND status='pending'").get(path[2]) as Row | undefined;
+    if (!requestRow) return fail("Pending hotel request not found.", 404);
     const at = nowIso();
-    const result = db.prepare("UPDATE access_requests SET status='rejected',reviewed_at=?,reviewed_by=? WHERE id=? AND status='pending'").run(at, auth.id, path[2]);
-    if (!result.changes) return fail("Pending hotel request not found.", 404);
-    audit(auth.id, "reject_hotel_request", "access_request", path[2], reason);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = db.prepare("UPDATE access_requests SET status='rejected',reviewed_at=?,reviewed_by=? WHERE id=? AND status='pending'").run(at, auth.id, path[2]);
+      if (!result.changes) { db.exec("ROLLBACK"); return fail("Pending hotel request not found.", 404); }
+      db.prepare("DELETE FROM users WHERE email=? AND role='hotel_manager' AND status='pending' AND hotel_id IS NULL").run(requestRow.email);
+      audit(auth.id, "reject_hotel_request", "access_request", path[2], reason);
+      db.exec("COMMIT");
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch { /* no transaction remained open */ }
+      throw error;
+    }
     return ok({ ok: true });
   }
 

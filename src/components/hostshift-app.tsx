@@ -30,6 +30,7 @@ export default function HostshiftApp() {
   const [user, setUser] = useState<User | null>(null);
   const [sandboxMode, setSandboxMode] = useState(true);
   const [pilotArea, setPilotArea] = useState("Pilot Demo Area");
+  const [supportedRoles, setSupportedRoles] = useState<string[]>(["Banquet Server", "Housekeeping Attendant", "Kitchen Assistant", "Restaurant Service", "Front Desk Assistant"]);
   const [view, setView] = useState<View>("overview");
   const [hotelData, setHotelData] = useState<AnyRecord>({ shifts: [], payments: [], stats: {} });
   const [adminData, setAdminData] = useState<AnyRecord>({ accessRequests: [], workers: [], shifts: [], disputes: [], messages: [], payments: [], settings: [] });
@@ -38,7 +39,7 @@ export default function HostshiftApp() {
   const [selectedWorkers, setSelectedWorkers] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ text: string; kind: "success" | "error" } | null>(null);
-  const [modal, setModal] = useState<"shift" | "edit-shift" | "access" | "reset" | null>(null);
+  const [modal, setModal] = useState<"shift" | "edit-shift" | "access" | "worker" | "reset" | null>(null);
   const [resetToken, setResetToken] = useState("");
   const [isResetPage, setIsResetPage] = useState(false);
   const [resetLink, setResetLink] = useState("");
@@ -62,6 +63,7 @@ export default function HostshiftApp() {
       if (cancelled) return;
       setSandboxMode(result.sandbox !== false);
       setPilotArea(result.pilotArea || "Pilot Area");
+      setSupportedRoles(Array.isArray(result.supportedRoles) ? result.supportedRoles : []);
       if (result.user) {
         setUser(result.user);
         setLoginEmail(result.user.email);
@@ -95,8 +97,10 @@ export default function HostshiftApp() {
       await refresh(user);
       if (selectedShift && user?.role === "hotel_manager") await openShift(selectedShift.id, false);
       if (selectedShift && user?.role === "admin") await openShift(selectedShift.id, false);
+      return true;
     } catch (error) {
       notify(error instanceof Error ? error.message : "Action could not be completed.", "error");
+      return false;
     } finally { setBusy(false); }
   };
 
@@ -146,11 +150,12 @@ export default function HostshiftApp() {
   if (!user || isResetPage) {
     return <LoginScreen
       busy={busy} email={loginEmail} setEmail={setLoginEmail} password={loginPassword} setPassword={setLoginPassword}
-      sandboxMode={sandboxMode} pilotArea={pilotArea} notice={notice} modal={modal} setModal={setModal}
+      sandboxMode={sandboxMode} pilotArea={pilotArea} supportedRoles={supportedRoles} notice={notice} modal={modal} setModal={setModal}
       signIn={signIn} resetToken={resetToken} setResetToken={setResetToken} resetLink={resetLink} setResetLink={setResetLink}
-      onAccessRequest={async (form) => run(async () => { await api("access-requests", "POST", form); setModal(null); }, "Hotel access request sent for manual review.")}
-      onForgot={async (email) => { const r = await api("auth/forgot", "POST", { email }); setResetLink(r.sandboxResetUrl || ""); notify(r.message); }}
-      onReset={async (token, password) => { const r = await api("auth/reset", "POST", { token, password }); try { await api("auth/logout", "POST", {}); } catch { /* reset still completed */ } setUser(null); setIsResetPage(false); setModal(null); window.history.replaceState({}, "", "/"); notify(r.message); }}
+      onAccessRequest={async (form: AnyRecord) => run(async () => { await api("access-requests", "POST", form); setModal(null); }, "Request sent. You can sign in with your chosen password after the hotel is approved.")}
+      onWorkerRequest={async (form: AnyRecord) => run(async () => { await api("worker-registration-requests", "POST", form); setModal(null); }, "Registration request received. The pilot team will verify your profile and contact you on WhatsApp.")}
+      onForgot={async (email: string) => { const r = await api("auth/forgot", "POST", { email }); setResetLink(r.sandboxResetUrl || ""); notify(r.message); }}
+      onReset={async (token: string, password: string) => { const r = await api("auth/reset", "POST", { token, password }); try { await api("auth/logout", "POST", {}); } catch { /* reset still completed */ } setUser(null); setIsResetPage(false); setModal(null); window.history.replaceState({}, "", "/"); notify(r.message); }}
     />;
   }
 
@@ -188,13 +193,13 @@ export default function HostshiftApp() {
           {admin ? <AdminView view={view} data={adminData} busy={busy} sandboxMode={sandboxMode} onRun={run} onRefresh={() => refresh(user)} /> : <HotelView
             view={view} user={user} data={hotelData} busy={busy} sandboxMode={sandboxMode} selectedShift={selectedShift}
             matchesData={matchesData} selectedWorkers={selectedWorkers} setSelectedWorkers={setSelectedWorkers}
-            onNewShift={() => setModal("shift")} onEditShift={() => setModal("edit-shift")} onOpenShift={(shiftId) => void openShift(shiftId)} onBack={() => { setSelectedShift(null); setMatchesData(null); }} onSetView={setView} onInvite={inviteWorkers}
+            onNewShift={() => setModal("shift")} onEditShift={() => setModal("edit-shift")} onOpenShift={(shiftId: string) => void openShift(shiftId)} onBack={() => { setSelectedShift(null); setMatchesData(null); }} onSetView={setView} onInvite={inviteWorkers}
             onConfirm={confirmWorkers} onRun={run} onPayment={setPaymentModal} onRefresh={() => refresh(user)} onAccess={() => setModal("access")}
           />}
         </div>
       </main>
 
-      {(modal === "shift" || modal === "edit-shift") && !admin && <ShiftModal key={modal === "edit-shift" ? selectedShift?.id || "edit" : "new"} busy={busy} hotel={hotelData.hotel} supportedRoles={hotelData.supportedRoles} initialShift={modal === "edit-shift" ? selectedShift : null} onClose={() => setModal(null)} onSubmit={(form) => run(async () => {
+      {(modal === "shift" || modal === "edit-shift") && !admin && <ShiftModal key={modal === "edit-shift" ? selectedShift?.id || "edit" : "new"} busy={busy} hotel={hotelData.hotel} supportedRoles={hotelData.supportedRoles} initialShift={modal === "edit-shift" ? selectedShift : null} onClose={() => setModal(null)} onSubmit={(form: AnyRecord) => run(async () => {
         const editing = modal === "edit-shift" && selectedShift;
         const result = await api(editing ? `hotel/shifts/${selectedShift.id}` : "hotel/shifts", editing ? "PATCH" : "POST", form);
         setModal(null);
@@ -202,7 +207,7 @@ export default function HostshiftApp() {
         await openShift(result.shift.id);
         notify(editing ? "Shift updated." : "Shift posted. Review nearby workers and send the first invitation batch.");
       })} />}
-      {modal === "access" && <AccessModal busy={busy} onClose={() => setModal(null)} onSubmit={async (form) => run(async () => { await api("access-requests", "POST", form); setModal(null); }, "Hotel access request sent for manual review.")} />}
+      {modal === "access" && <AccessModal busy={busy} onClose={() => setModal(null)} onSubmit={async (form: AnyRecord) => run(async () => { await api("access-requests", "POST", form); setModal(null); }, "Hotel access request sent for manual review.")} />}
       {paymentModal && <PaymentModal payment={paymentModal} sandboxMode={sandboxMode} onClose={() => setPaymentModal(null)} onSimulate={() => run(async () => {
         await api(`payments/${paymentModal.id}/sandbox-success`, "POST", {});
         setPaymentModal(null);
@@ -215,9 +220,56 @@ export default function HostshiftApp() {
 function LoginScreen(props: AnyRecord) {
   const [email, setEmail] = useState(props.email);
   const [password, setPassword] = useState(props.password);
-  const [accessForm, setAccessForm] = useState({ hotelName: "", managerName: "", email: "", phone: "", city: "", area: "", address: "" });
+  const [accessForm, setAccessForm] = useState({ hotelName: "", managerName: "", email: "", phone: "", city: "", area: "", address: "", password: "" });
+  const [confirmAccessPassword, setConfirmAccessPassword] = useState("");
+  const [accessError, setAccessError] = useState("");
+  const [workerForm, setWorkerForm] = useState({ name: "", phone: "", city: props.pilotArea || "", area: "", latitude: "", longitude: "", radiusKm: "10", roles: [] as string[], skills: "", availability: [] as string[], language: "Hindi", optedIn: false });
+  const [workerError, setWorkerError] = useState("");
+  const [locationStatus, setLocationStatus] = useState("");
   const [resetPassword, setResetPassword] = useState("");
-  const submitAccess = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); props.busy ? null : await props.onAccessRequest(accessForm); };
+  const workerRoleOptions = Array.isArray(props.supportedRoles) && props.supportedRoles.length ? props.supportedRoles : ["Banquet Server", "Housekeeping Attendant", "Kitchen Assistant", "Restaurant Service", "Front Desk Assistant"];
+  const submitAccess = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (props.busy) return;
+    if (accessForm.password !== confirmAccessPassword) { setAccessError("The passwords do not match."); return; }
+    setAccessError("");
+    const submitted = await props.onAccessRequest(accessForm);
+    if (submitted) {
+      setAccessForm({ hotelName: "", managerName: "", email: "", phone: "", city: "", area: "", address: "", password: "" });
+      setConfirmAccessPassword("");
+    }
+  };
+  const submitWorker = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (props.busy) return;
+    if (!workerForm.roles.length || !workerForm.availability.length || !workerForm.optedIn) {
+      setWorkerError("Choose at least one role and available day, then agree to receive WhatsApp shift alerts.");
+      return;
+    }
+    setWorkerError("");
+    const submitted = await props.onWorkerRequest(workerForm);
+    if (submitted) {
+      setWorkerForm({ name: "", phone: "", city: props.pilotArea || "", area: "", latitude: "", longitude: "", radiusKm: "10", roles: [], skills: "", availability: [], language: "Hindi", optedIn: false });
+      setLocationStatus("");
+    }
+  };
+  const toggleWorkerChoice = (key: "roles" | "availability", value: string) => {
+    const selected = workerForm[key];
+    setWorkerForm({ ...workerForm, [key]: selected.includes(value) ? selected.filter((item) => item !== value) : [...selected, value] });
+    setWorkerError("");
+  };
+  const useApproximateLocation = () => {
+    setLocationStatus("Getting your location…");
+    if (!navigator.geolocation) { setLocationStatus("Location is unavailable in this browser. Enter a nearby landmark pin manually."); return; }
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => {
+        setWorkerForm((current) => ({ ...current, latitude: coords.latitude.toFixed(3), longitude: coords.longitude.toFixed(3) }));
+        setLocationStatus("Approximate location added. Check that it points near a public landmark.");
+      },
+      () => setLocationStatus("We could not get your location. Allow location access or enter a nearby landmark pin manually."),
+      { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 },
+    );
+  };
   const submitReset = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); await props.onReset(props.resetToken, resetPassword); };
   return <div className="auth-page">
     <div className="auth-visual">
@@ -227,16 +279,37 @@ function LoginScreen(props: AnyRecord) {
       <div className="orb orb-one"/><div className="orb orb-two"/>
     </div>
     <div className="auth-panel">
-      <div className="auth-panel-top"><span className="small-label">HOTEL PARTNER PORTAL</span><span className="secure-label">◈ Secure sign in</span></div>
+      <div className="auth-panel-top"><span className="small-label">{props.modal === "worker" ? "WORKER REGISTRATION" : "HOTEL PARTNER PORTAL"}</span><span className="secure-label">◈ Secure sign in</span></div>
       {props.modal === "access" ? <form className="auth-form" onSubmit={submitAccess}>
         <button type="button" className="back-link" onClick={() => props.setModal(null)}>← Back to sign in</button>
-        <h2>Request hotel access</h2><p>Our pilot team will verify your hotel before sending an invitation.</p>
+        <h2>Request hotel access</h2><p>Our pilot team will verify your hotel. After approval, sign in with the password you choose here.</p>
         <Field label="Hotel name"><input required value={accessForm.hotelName} onChange={(e) => setAccessForm({ ...accessForm, hotelName: e.target.value })} placeholder="e.g. The Olive Hotel"/></Field>
         <div className="form-grid two"><Field label="Manager name"><input required value={accessForm.managerName} onChange={(e) => setAccessForm({ ...accessForm, managerName: e.target.value })}/></Field><Field label="Phone"><input required value={accessForm.phone} onChange={(e) => setAccessForm({ ...accessForm, phone: e.target.value })}/></Field></div>
         <Field label="Business email"><input required type="email" value={accessForm.email} onChange={(e) => setAccessForm({ ...accessForm, email: e.target.value })}/></Field>
         <div className="form-grid two"><Field label="City"><input required value={accessForm.city} onChange={(e) => setAccessForm({ ...accessForm, city: e.target.value })}/></Field><Field label="Area"><input required value={accessForm.area} onChange={(e) => setAccessForm({ ...accessForm, area: e.target.value })}/></Field></div>
         <Field label="Hotel address"><input value={accessForm.address} onChange={(e) => setAccessForm({ ...accessForm, address: e.target.value })}/></Field>
+        <Field label="Create password" hint="Use at least 10 characters. This stays inactive until your hotel is approved."><input required type="password" autoComplete="new-password" minLength={10} value={accessForm.password} onChange={(e) => { setAccessForm({ ...accessForm, password: e.target.value }); setAccessError(""); }}/></Field>
+        <Field label="Confirm password"><input required type="password" autoComplete="new-password" minLength={10} value={confirmAccessPassword} onChange={(e) => { setConfirmAccessPassword(e.target.value); setAccessError(""); }}/></Field>
+        {accessError && <p className="form-validation-error" role="alert">{accessError}</p>}
         <button className="primary-button full" disabled={props.busy}>Send access request <span>→</span></button>
+      </form> : props.modal === "worker" ? <form className="auth-form worker-request-form" onSubmit={submitWorker}>
+        <button type="button" className="back-link" onClick={() => props.setModal(null)}>← Back to sign in</button>
+        <h2>Register as a worker</h2><p>Send a one-time profile request. The pilot team verifies workers before they receive nearby shift invitations.</p>
+        <Field label="Full name"><input required autoComplete="name" value={workerForm.name} onChange={(e) => setWorkerForm({ ...workerForm, name: e.target.value })}/></Field>
+        <Field label="WhatsApp number" hint="Include your country code, for example +91 98765 43210."><input required type="tel" inputMode="tel" autoComplete="tel" placeholder="+91 98765 43210" value={workerForm.phone} onChange={(e) => setWorkerForm({ ...workerForm, phone: e.target.value })}/></Field>
+        <div className="form-grid two"><Field label="City / town"><input required value={workerForm.city} onChange={(e) => setWorkerForm({ ...workerForm, city: e.target.value })}/></Field><Field label="Area / nearby landmark"><input required value={workerForm.area} onChange={(e) => setWorkerForm({ ...workerForm, area: e.target.value })} placeholder="A public landmark near you"/></Field></div>
+        <button type="button" className="secondary-button full" onClick={useApproximateLocation}>◎ Use approximate current location</button>
+        <div className="form-grid two"><Field label="Approx. latitude"><input required type="number" step="any" inputMode="decimal" placeholder="28.6139" value={workerForm.latitude} onChange={(e) => { setWorkerForm({ ...workerForm, latitude: e.target.value }); setLocationStatus(""); }}/></Field><Field label="Approx. longitude"><input required type="number" step="any" inputMode="decimal" placeholder="77.2090" value={workerForm.longitude} onChange={(e) => { setWorkerForm({ ...workerForm, longitude: e.target.value }); setLocationStatus(""); }}/></Field></div>
+        <small className="muted location-status" aria-live="polite">{locationStatus || "Use an approximate public landmark pin, not your home address. Coordinates are rounded before saving."}</small>
+        <Field label="How far can you travel? (km)"><input required type="number" min="1" max="100" value={workerForm.radiusKm} onChange={(e) => setWorkerForm({ ...workerForm, radiusKm: e.target.value })}/></Field>
+        <fieldset className="choice-field"><legend>Roles you can work</legend><div className="choice-grid">{workerRoleOptions.map((role: string) => <label className="choice-option" key={role}><input type="checkbox" checked={workerForm.roles.includes(role)} onChange={() => toggleWorkerChoice("roles", role)}/><span>{role}</span></label>)}</div></fieldset>
+        <Field label="Skills or experience" hint="Optional; separate multiple skills with commas."><input value={workerForm.skills} onChange={(e) => setWorkerForm({ ...workerForm, skills: e.target.value })} placeholder="Guest service, banquet setup"/></Field>
+        <fieldset className="choice-field"><legend>Days you are available</legend><div className="choice-grid availability-grid">{["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun", "All days"].map((day) => <label className="choice-option" key={day}><input type="checkbox" checked={workerForm.availability.includes(day)} onChange={() => toggleWorkerChoice("availability", day)}/><span>{day}</span></label>)}</div></fieldset>
+        <Field label="Preferred language"><input value={workerForm.language} onChange={(e) => setWorkerForm({ ...workerForm, language: e.target.value })}/></Field>
+        <label className="consent-row worker-consent"><input type="checkbox" checked={workerForm.optedIn} onChange={(e) => { setWorkerForm({ ...workerForm, optedIn: e.target.checked }); setWorkerError(""); }}/> I agree to receive shift invitations and updates from Hostshift on WhatsApp. I can ask the pilot team to stop messages at any time.</label>
+        {workerError && <p className="form-validation-error" role="alert">{workerError}</p>}
+        <button className="primary-button full" disabled={props.busy}>Send registration request <span>→</span></button>
+        <small className="muted">No worker password or bank details are collected here. Payment onboarding happens after verification.</small>
       </form> : props.modal === "reset" ? <form className="auth-form" onSubmit={submitReset}>
         <h2>Set a new password</h2><p>Choose a secure password with at least 10 characters.</p>
         <Field label="New password"><input autoFocus required minLength={10} type="password" value={resetPassword} onChange={(e) => setResetPassword(e.target.value)}/></Field>
@@ -250,6 +323,7 @@ function LoginScreen(props: AnyRecord) {
         <button className="primary-button full" disabled={props.busy}>{props.busy ? "Signing in…" : "Sign in"}<span>→</span></button>
         <div className="auth-divider"><span>NEW TO HOSTSHIFT?</span></div>
         <button type="button" className="secondary-button full" onClick={() => props.setModal("access")}>Request hotel access</button>
+        <button type="button" className="secondary-button full" onClick={() => props.setModal("worker")}>Register as a worker</button>
         {props.sandboxMode && <div className="demo-credentials"><div className="demo-icon">✳</div><div><strong>Demo credentials</strong><span>manager@hostshift.demo / HotelDemo!26</span><span>admin@hostshift.demo / HostshiftDemo!26</span></div><button type="button" title="Sign in as admin" onClick={() => { setEmail("admin@hostshift.demo"); setPassword("HostshiftDemo!26"); props.setEmail("admin@hostshift.demo"); props.setPassword("HostshiftDemo!26"); }}>↗</button></div>}
       </form>}
       <div className="auth-footer"><span>© {new Date().getFullYear()} Hostshift</span><span>Privacy · Terms</span></div>
@@ -269,6 +343,7 @@ function HotelView(props: AnyRecord) {
   const shifts: AnyRecord[] = data.shifts || [];
   const payments: AnyRecord[] = data.payments || [];
   const initialsName = user.hotel_name || "Hotel";
+  const activeShiftCount = shifts.filter((shift) => !["completed", "cancelled"].includes(shift.status)).length;
   return <>
     <div className="page-heading"><div><div className="eyebrow">HOTEL WORKSPACE <span className="heading-dot"/> {data.hotel?.city || "Pilot area"}</div><h1>{view === "overview" ? `Welcome back, ${user.name.split(" ")[0]}` : view === "shifts" ? "Your shifts" : view === "payments" ? "Payments" : "Support"}</h1><p>{view === "overview" ? `${initialsName} · Manage temporary staffing and upcoming shift coverage.` : view === "shifts" ? "Post a shift, review nearby workers, and confirm your team." : view === "payments" ? "Track hotel collections and worker payouts for your shifts." : "Contact the pilot team about a shift, worker, or payment."}</p></div>
       <div className="heading-actions">{view !== "support" && <button className="secondary-button" onClick={() => props.onRefresh()}>↻ Refresh</button>}<button className="primary-button" onClick={props.onNewShift}>＋ Post a shift</button></div></div>
@@ -345,7 +420,7 @@ function AdminView(props: AnyRecord) {
       <div className="metric-grid"><Metric icon="⌂" title="Hotel requests" value={String(pendingRequests.length)} foot="Awaiting manual review" accent="mint"/><Metric icon="♙" title="Workers to verify" value={String(pendingWorkers.length)} foot="Pilot verification queue" accent="blue"/><Metric icon="▦" title="Active shifts" value={String((data.shifts || []).filter((s: AnyRecord) => !["cancelled","completed"].includes(s.status)).length)} foot="Across pilot hotels" accent="amber"/><Metric icon="₹" title="Payment action" value={String(pendingPayments.length)} foot="Collection or payout pending" accent="purple"/></div>
       <div className="overview-grid admin-overview-grid"><div className="panel"><div className="panel-head"><div><h3>Latest shifts</h3><span className="muted">Pilot area activity</span></div></div><ShiftAdminTable shifts={(data.shifts || []).slice(0, 6)}/></div><div className="panel"><div className="panel-head"><div><h3>Open support cases</h3><span className="muted">Attendance, payment, and hotel requests</span></div></div>{(data.disputes || []).filter((d: AnyRecord) => d.status === "open").slice(0, 3).map((dispute: AnyRecord) => <DisputeMini key={dispute.id} dispute={dispute}/>)}{(data.supportRequests || []).filter((r: AnyRecord) => r.status === "open").slice(0, 3).map((request: AnyRecord) => <div className="mini-dispute" key={request.id}><div className="mini-dispute-icon">?</div><div><strong>{request.category} · {request.hotel_name}</strong><span>{request.manager_name}</span><small>{request.description}</small></div><StatusPill status={request.status}/></div>)}{!(data.disputes || []).some((d: AnyRecord) => d.status === "open") && !(data.supportRequests || []).some((r: AnyRecord) => r.status === "open") && <EmptyState title="No open cases" text="New disputes and support requests will appear here."/>}</div></div>
     </>}
-    {view === "access" && <div className="panel"><div className="panel-head"><div><h3>Hotel access requests</h3><span className="muted">Review details and set an approximate map pin before inviting managers.</span></div><span className="count-pill">{pendingRequests.length} pending</span></div>{pendingRequests.length ? <div className="request-grid">{pendingRequests.map((request: AnyRecord) => <div className="request-card" key={request.id}><div className="request-symbol">⌂</div><div className="request-info"><strong>{request.hotel_name}</strong><span>{request.city} · {request.area}</span><span>{request.manager_name} · {request.phone}</span><span>{request.email}</span><small>Requested {new Date(request.created_at).toLocaleDateString()}</small><div className="form-grid two"><Field label="Approx. latitude"><input required inputMode="decimal" placeholder="28.6139" value={hotelPins[request.id]?.latitude || ""} onChange={(e) => setHotelPins({ ...hotelPins, [request.id]: { latitude: e.target.value, longitude: hotelPins[request.id]?.longitude || "" } })}/></Field><Field label="Approx. longitude"><input required inputMode="decimal" placeholder="77.2090" value={hotelPins[request.id]?.longitude || ""} onChange={(e) => setHotelPins({ ...hotelPins, [request.id]: { latitude: hotelPins[request.id]?.latitude || "", longitude: e.target.value } })}/></Field></div><Field label="Rejection reason (if needed)"><input value={hotelRejectReasons[request.id] || ""} onChange={(e) => setHotelRejectReasons({ ...hotelRejectReasons, [request.id]: e.target.value })} placeholder="e.g. Outside pilot area"/></Field><div className="request-actions"><button className="primary-button small" disabled={busy || !hotelPins[request.id]?.latitude || !hotelPins[request.id]?.longitude} onClick={() => props.onRun(async () => { const result = await api(`admin/access-requests/${request.id}/approve`, "POST", hotelPins[request.id]); if (result.inviteUrl) setInviteLink(result.inviteUrl); }, "Hotel approved. Share the setup link with its manager.")}>Approve & invite</button><button className="secondary-button small" disabled={busy || !hotelRejectReasons[request.id]?.trim()} onClick={() => props.onRun(async () => { await api(`admin/access-requests/${request.id}/reject`, "POST", { reason: hotelRejectReasons[request.id] }); }, "Hotel request rejected with a recorded reason.")}>Reject</button></div></div></div>)}</div> : <EmptyState icon="✓" title="All caught up" text="New hotel access requests will appear here."/>}{inviteLink && <div className="sandbox-reset"><strong>One-time manager setup link:</strong> <a href={inviteLink}>{inviteLink}</a><button className="text-button" onClick={() => navigator.clipboard?.writeText(new URL(inviteLink, window.location.origin).toString())}>Copy</button></div>}</div>}
+    {view === "access" && <div className="panel"><div className="panel-head"><div><h3>Hotel access requests</h3><span className="muted">Review hotel details and set an approximate map pin. New managers already chose a password.</span></div><span className="count-pill">{pendingRequests.length} pending</span></div>{pendingRequests.length ? <div className="request-grid">{pendingRequests.map((request: AnyRecord) => <div className="request-card" key={request.id}><div className="request-symbol">⌂</div><div className="request-info"><strong>{request.hotel_name}</strong><span>{request.city} · {request.area}</span><span>{request.manager_name} · {request.phone}</span><span>{request.email}</span><small>Requested {new Date(request.created_at).toLocaleDateString()}</small><div className="form-grid two"><Field label="Approx. latitude"><input required inputMode="decimal" placeholder="28.6139" value={hotelPins[request.id]?.latitude || ""} onChange={(e) => setHotelPins({ ...hotelPins, [request.id]: { latitude: e.target.value, longitude: hotelPins[request.id]?.longitude || "" } })}/></Field><Field label="Approx. longitude"><input required inputMode="decimal" placeholder="77.2090" value={hotelPins[request.id]?.longitude || ""} onChange={(e) => setHotelPins({ ...hotelPins, [request.id]: { latitude: hotelPins[request.id]?.latitude || "", longitude: e.target.value } })}/></Field></div><Field label="Rejection reason (if needed)"><input value={hotelRejectReasons[request.id] || ""} onChange={(e) => setHotelRejectReasons({ ...hotelRejectReasons, [request.id]: e.target.value })} placeholder="e.g. Outside pilot area"/></Field><div className="request-actions"><button className="primary-button small" disabled={busy || !hotelPins[request.id]?.latitude || !hotelPins[request.id]?.longitude} onClick={() => props.onRun(async () => { const result = await api(`admin/access-requests/${request.id}/approve`, "POST", hotelPins[request.id]); if (result.inviteUrl) setInviteLink(result.inviteUrl); }, request.manager_password_set ? "Hotel approved. The manager can sign in with the password they chose." : "Hotel approved. Share the setup link with its manager.")}>{request.manager_password_set ? "Approve access" : "Approve & invite"}</button><button className="secondary-button small" disabled={busy || !hotelRejectReasons[request.id]?.trim()} onClick={() => props.onRun(async () => { await api(`admin/access-requests/${request.id}/reject`, "POST", { reason: hotelRejectReasons[request.id] }); }, "Hotel request rejected with a recorded reason.")}>Reject</button></div></div></div>)}</div> : <EmptyState icon="✓" title="All caught up" text="New hotel access requests will appear here."/>}{inviteLink && <div className="sandbox-reset"><strong>One-time manager setup link:</strong> <a href={inviteLink}>{inviteLink}</a><button className="text-button" onClick={() => navigator.clipboard?.writeText(new URL(inviteLink, window.location.origin).toString())}>Copy</button></div>}</div>}
     {view === "workers" && <div className="admin-columns">
       <div className="panel"><div className="panel-head"><div><h3>Worker verification</h3><span className="muted">Approve only after checking registration details.</span></div><span className="count-pill">{pendingWorkers.length} pending</span></div><WorkerTable workers={data.workers || []} busy={busy} onVerify={(id: string) => props.onRun(async () => { await api(`admin/workers/${id}`, "PATCH", { verified: true, reason: "Manually verified during pilot." }); }, "Worker verified.")} onToggleAlerts={toggleWorkerAlerts}/></div>
       <div className="panel add-worker-panel"><div className="panel-head"><div><h3>Add worker</h3><span className="muted">WhatsApp registration simulator</span></div><span className="sandbox-tag"><span/> SANDBOX</span></div><form onSubmit={async (event) => { event.preventDefault(); await props.onRun(async () => { await api("sandbox/workers", "POST", { ...workerForm, roles: workerForm.roles, skills: workerForm.skills }); setWorkerForm(initialWorkerForm); }, "Worker profile created. Verify it before matching."); }}>
@@ -406,7 +481,7 @@ function ShiftAdminTable({ shifts }: { shifts: AnyRecord[] }) {
 }
 
 function WorkerTable({ workers, busy, onVerify, onToggleAlerts }: { workers: AnyRecord[]; busy: boolean; onVerify: (id: string) => void; onToggleAlerts: (worker: AnyRecord) => void }) {
-  return workers.length ? <div className="table-wrap"><table><thead><tr><th>WORKER</th><th>ROLES</th><th>AREA / RADIUS</th><th>ALERTS</th><th>VERIFICATION</th></tr></thead><tbody>{workers.map((worker) => <tr key={worker.id}><td><strong>{worker.name}</strong><small>{worker.phone}</small></td><td>{parseList(worker.roles_json).slice(0, 2).join(", ")}</td><td>{worker.area}<small>{worker.radius_km} km · {worker.latitude == null ? "no map pin" : "approx. pin set"}</small></td><td><button className={`mini-button ${worker.opted_in ? "" : "green"}`} disabled={busy} onClick={() => onToggleAlerts(worker)}>{worker.opted_in ? "Pause alerts" : "Resume alerts"}</button></td><td>{worker.verified ? <StatusPill status="verified"/> : <button className="mini-button green" disabled={busy} onClick={() => onVerify(worker.id)}>Verify</button>}</td></tr>)}</tbody></table></div> : <EmptyState title="No worker profiles" text="Add or register workers to start the pilot."/>;
+  return workers.length ? <div className="table-wrap"><table><thead><tr><th>WORKER</th><th>ROLES / SKILLS</th><th>AREA / RADIUS</th><th>AVAILABILITY</th><th>ALERTS</th><th>VERIFICATION</th></tr></thead><tbody>{workers.map((worker) => <tr key={worker.id}><td><strong>{worker.name}</strong><small>{worker.phone}</small></td><td>{parseList(worker.roles_json).join(", ")}<small>{parseList(worker.skills_json).join(", ") || "No extra skills listed"}</small></td><td>{worker.area}<small>{worker.city} · {worker.radius_km} km · {worker.latitude == null ? "no map pin" : "approx. pin set"}</small></td><td>{parseList(worker.availability_json).join(", ") || "Not set"}<small>{worker.language || "Language not set"}</small></td><td><button className={`mini-button ${worker.opted_in ? "" : "green"}`} disabled={busy} onClick={() => onToggleAlerts(worker)}>{worker.opted_in ? "Pause alerts" : "Resume alerts"}</button></td><td>{worker.verified ? <StatusPill status="verified"/> : <button className="mini-button green" disabled={busy} onClick={() => onVerify(worker.id)}>Verify</button>}</td></tr>)}</tbody></table></div> : <EmptyState title="No worker profiles" text="Add or register workers to start the pilot."/>;
 }
 
 function DisputeMini({ dispute }: { dispute: AnyRecord }) {
@@ -428,8 +503,16 @@ function ShiftModal({ busy, hotel, supportedRoles, initialShift, onClose, onSubm
 }
 
 function AccessModal({ busy, onClose, onSubmit }: AnyRecord) {
-  const [form, setForm] = useState({ hotelName: "", managerName: "", email: "", phone: "", city: "", area: "", address: "" });
-  return <div className="modal-scrim"><form className="modal-card" onSubmit={(event) => { event.preventDefault(); void onSubmit(form); }}><div className="modal-heading"><div><span className="eyebrow">HOTEL ACCESS</span><h2>Request hotel access</h2><p>A pilot admin will verify your hotel before inviting a manager.</p></div><button type="button" className="close-button" onClick={onClose}>×</button></div><Field label="Hotel name"><input required value={form.hotelName} onChange={(e) => setForm({ ...form, hotelName: e.target.value })}/></Field><div className="form-grid two"><Field label="Manager name"><input required value={form.managerName} onChange={(e) => setForm({ ...form, managerName: e.target.value })}/></Field><Field label="Phone"><input required value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })}/></Field></div><Field label="Business email"><input required type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })}/></Field><div className="form-grid two"><Field label="City"><input required value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })}/></Field><Field label="Area"><input required value={form.area} onChange={(e) => setForm({ ...form, area: e.target.value })}/></Field></div><Field label="Address"><input value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })}/></Field><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={busy}>Submit request →</button></div></form></div>;
+  const [form, setForm] = useState({ hotelName: "", managerName: "", email: "", phone: "", city: "", area: "", address: "", password: "" });
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (form.password !== confirmPassword) { setError("The passwords do not match."); return; }
+    setError("");
+    void onSubmit(form);
+  };
+  return <div className="modal-scrim"><form className="modal-card" onSubmit={submit}><div className="modal-heading"><div><span className="eyebrow">HOTEL ACCESS</span><h2>Request hotel access</h2><p>A pilot admin will verify your hotel. Sign in with your chosen password after approval.</p></div><button type="button" className="close-button" onClick={onClose}>×</button></div><Field label="Hotel name"><input required value={form.hotelName} onChange={(e) => setForm({ ...form, hotelName: e.target.value })}/></Field><div className="form-grid two"><Field label="Manager name"><input required value={form.managerName} onChange={(e) => setForm({ ...form, managerName: e.target.value })}/></Field><Field label="Phone"><input required value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })}/></Field></div><Field label="Business email"><input required type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })}/></Field><div className="form-grid two"><Field label="City"><input required value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })}/></Field><Field label="Area"><input required value={form.area} onChange={(e) => setForm({ ...form, area: e.target.value })}/></Field></div><Field label="Address"><input value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })}/></Field><Field label="Create password" hint="At least 10 characters; active after hotel approval."><input required type="password" autoComplete="new-password" minLength={10} value={form.password} onChange={(e) => { setForm({ ...form, password: e.target.value }); setError(""); }}/></Field><Field label="Confirm password"><input required type="password" autoComplete="new-password" minLength={10} value={confirmPassword} onChange={(e) => { setConfirmPassword(e.target.value); setError(""); }}/></Field>{error && <p className="form-validation-error" role="alert">{error}</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={busy}>Submit request →</button></div></form></div>;
 }
 
 function PaymentModal({ payment, sandboxMode, onClose, onSimulate }: AnyRecord) {
